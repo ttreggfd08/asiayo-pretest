@@ -1,0 +1,15 @@
+# 01-storageclass.yaml
+# 用 EBS CSI 動態佈建 gp3 磁碟，對應架構圖的 pv（由 PVC 自動產生）。
+# volumeBindingMode: WaitForFirstConsumer 讓磁碟在 Pod 被排程後，
+# 才在「同一個 AZ」建立 EBS，避免 Pod 與磁碟落在不同 AZ 無法掛載。
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+reclaimPolicy: Retain          # 資料庫磁碟保留，避免誤刪 PVC 連帶刪掉資料
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer

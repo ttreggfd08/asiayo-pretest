@@ -1,0 +1,174 @@
+# 13-mysql-statefulset.yaml
+# 對應架構圖：sts(mysql) -> pod writer (mysql-0) + pod reader (mysql-1, mysql-2)
+#
+# 高可用設計：
+#   - replicas: 3，跨節點/AZ 分散（podAntiAffinity + topologySpreadConstraints）
+#   - 每個 pod 有獨立的 PVC（volumeClaimTemplates），資料不共用、不會互相覆蓋
+#   - init container 依 Pod 序號決定 primary / replica 設定與 server-id
+#   - replication-bootstrap sidecar 自動建立 GTID 一主多從複寫（見 11-configmap）
+#   - liveness/readiness/startup probe 確保流量只進健康的 pod
+#
+# 限制：此為「無自動 failover」的一主多從。mysql-0 仍是寫入單點，
+#       primary 故障需人工把 writer 指向新 primary。正式環境請用
+#       MySQL Operator 或 RDS/Aurora（README 有說明）。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: asiayo
+spec:
+  serviceName: mysql        # 對應 headless service
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      terminationGracePeriodSeconds: 60   # 給 MySQL 足夠時間乾淨關閉
+
+      # --- 高可用：把 mysql pod 盡量分散到不同節點與不同 AZ ---
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: mysql
+              topologyKey: kubernetes.io/hostname   # 不同節點
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone  # 不同 AZ 平均分佈
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: mysql
+
+      initContainers:
+        # 依 ordinal 選設定：mysql-0 = primary，其餘 = replica，並寫入唯一 server-id
+        - name: init-mysql
+          image: mysql:8.0.40
+          command:
+            - bash
+            - "-c"
+            - |
+              set -ex
+              ordinal=${HOSTNAME##*-}
+              mkdir -p /mnt/conf.d
+              # server-id 必須全叢集唯一
+              echo "[mysqld]"            >  /mnt/conf.d/server-id.cnf
+              echo "server-id=$((100 + ordinal))" >> /mnt/conf.d/server-id.cnf
+              if [[ $ordinal -eq 0 ]]; then
+                cp /mnt/config-map/primary.cnf /mnt/conf.d/role.cnf
+              else
+                cp /mnt/config-map/replica.cnf /mnt/conf.d/role.cnf
+              fi
+          volumeMounts:
+            - name: conf
+              mountPath: /mnt/conf.d
+            - name: config-map
+              mountPath: /mnt/config-map
+
+      containers:
+        - name: mysql
+          image: mysql:8.0.40
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+          ports:
+            - name: mysql
+              containerPort: 3306
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: conf
+              mountPath: /etc/mysql/conf.d
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              memory: "2Gi"
+          # 探針用 MYSQL_PWD 帶密碼（bash -c 才會展開變數；避免密碼出現在 ps）
+          livenessProbe:
+            exec:
+              command: ["bash", "-c", 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot']
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["bash", "-c", 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -h 127.0.0.1 -uroot -e "SELECT 1"']
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          startupProbe:
+            exec:
+              command: ["bash", "-c", 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqladmin ping -h 127.0.0.1 -uroot']
+            failureThreshold: 30
+            periodSeconds: 10
+
+        # Sidecar：把 replica 接上 primary 做 GTID 複寫（見 11-configmap 的腳本）
+        - name: replication-bootstrap
+          image: mysql:8.0.40
+          command: ["bash", "/scripts/setup-replication.sh"]
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_REPL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_REPL_USER
+            - name: MYSQL_REPL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_REPL_PASSWORD
+            - name: MYSQL_APP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_APP_USER
+            - name: MYSQL_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_APP_PASSWORD
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_DATABASE
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              memory: "128Mi"
+          volumeMounts:
+            - name: config-map
+              mountPath: /scripts
+
+      volumes:
+        - name: conf
+          emptyDir: {}
+        - name: config-map
+          configMap:
+            name: mysql-config
+
+  # 每個 pod 各自一顆 EBS 磁碟（對應架構圖的 pv，由此 PVC 動態建立）
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 20Gi

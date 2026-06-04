@@ -1,0 +1,38 @@
+# 24-app-hpa-pdb.yaml
+# 高可用 + 彈性：HPA 依 CPU 自動擴縮；PDB 保障維護時的最低可用副本數。
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: asiayo-app-hpa
+  namespace: asiayo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: asiayo-app
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30   # 流量上衝時快速擴
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 縮容保守，避免抖動
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: asiayo-app-pdb
+  namespace: asiayo
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: asiayo-app

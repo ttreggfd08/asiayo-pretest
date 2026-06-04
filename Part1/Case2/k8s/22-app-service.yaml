@@ -1,0 +1,17 @@
+# 22-app-service.yaml
+# 對應架構圖：svc -> pod。ClusterIP 把流量負載平衡到後面的應用 pod。
+apiVersion: v1
+kind: Service
+metadata:
+  name: asiayo-app
+  namespace: asiayo
+  labels:
+    app: asiayo-app
+spec:
+  type: ClusterIP
+  selector:
+    app: asiayo-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

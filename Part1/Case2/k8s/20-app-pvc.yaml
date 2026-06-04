@@ -1,0 +1,18 @@
+# 20-app-pvc.yaml
+# 對應架構圖的 pvc -> pv（掛到應用 Deployment）。
+#
+# 重點：Deployment 有多個 replica 會分散在不同節點，
+#   - EBS(gp3) 是 ReadWriteOnce，只能掛在單一節點 -> 多副本共用會卡住
+#   - 因此「需要被多副本共寫的檔案」(如上傳目錄) 改用 EFS(ReadWriteMany)
+# 若應用本身無狀態(stateless)，其實不需要這個 PVC，靜態檔交給 S3/CDN 更佳。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-shared-data
+  namespace: asiayo
+spec:
+  accessModes: ["ReadWriteMany"]   # 多副本共享
+  storageClassName: efs-sc         # 需安裝 EFS CSI driver 並建立此 StorageClass
+  resources:
+    requests:
+      storage: 10Gi

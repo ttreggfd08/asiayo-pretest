@@ -1,0 +1,7 @@
+# 00-namespace.yaml — 對應架構圖的 Namespace: asiayo
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: asiayo
+  labels:
+    name: asiayo

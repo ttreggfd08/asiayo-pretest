@@ -1,0 +1,97 @@
+# 11-mysql-configmap.yaml
+# 區分 primary(寫) 與 replica(讀) 的設定，並提供複寫 bootstrap 腳本。
+# StatefulSet 的 init container 會依 Pod 序號(ordinal)挑選：
+#   - mysql-0  -> 套用 primary.cnf（可寫）
+#   - mysql-1+ -> 套用 replica.cnf（唯讀，跟隨 primary 做複寫）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: asiayo
+data:
+  primary.cnf: |
+    [mysqld]
+    log-bin = mysql-bin
+    binlog_format = ROW
+    gtid_mode = ON
+    enforce_gtid_consistency = ON
+    # server-id 由 init container 依 ordinal 動態寫入
+
+  replica.cnf: |
+    [mysqld]
+    log-bin = mysql-bin
+    binlog_format = ROW
+    gtid_mode = ON
+    enforce_gtid_consistency = ON
+    relay_log = relay-bin
+    read_only = ON                 # replica 只讀，避免雙寫
+    super_read_only = ON
+
+  # 複寫 bootstrap：由 sidecar 執行，idempotent（可重跑）。
+  # 設計給「全新叢集」：replica 先用 MySQL CLONE plugin 從 primary 完整複製
+  # 資料（含 GTID 狀態），再以 GTID auto-position 持續同步。
+  # 限制：無自動 failover；primary 換人需人工介入。正式環境請用 MySQL Operator
+  # 或 RDS/Aurora（見 README「限制與正式環境建議」）。
+  setup-replication.sh: |
+    #!/usr/bin/env bash
+    set -uo pipefail
+
+    ordinal="${HOSTNAME##*-}"
+    primary_host="mysql-0.mysql"
+
+    run_root() { mysql -h 127.0.0.1 -uroot -p"${MYSQL_ROOT_PASSWORD}" -N -s "$@"; }
+    local_up() { mysqladmin ping -h 127.0.0.1 -uroot -p"${MYSQL_ROOT_PASSWORD}" --silent >/dev/null 2>&1; }
+
+    echo "[bootstrap] 等待本機 mysqld..."
+    until local_up; do sleep 2; done
+
+    # clone plugin（已安裝會報錯，忽略）
+    run_root -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';" >/dev/null 2>&1 || true
+
+    # ---------- primary (mysql-0)：複寫帳號 + 應用 DB/帳號 ----------
+    if [ "${ordinal}" = "0" ]; then
+      echo "[primary] 確保複寫帳號與應用 DB/帳號存在"
+      run_root -e "
+        CREATE USER IF NOT EXISTS '${MYSQL_REPL_USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${MYSQL_REPL_PASSWORD}';
+        GRANT REPLICATION SLAVE, BACKUP_ADMIN ON *.* TO '${MYSQL_REPL_USER}'@'%';
+        CREATE DATABASE IF NOT EXISTS ${MYSQL_DATABASE};
+        CREATE USER IF NOT EXISTS '${MYSQL_APP_USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${MYSQL_APP_PASSWORD}';
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ${MYSQL_DATABASE}.* TO '${MYSQL_APP_USER}'@'%';
+        FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
+      echo "[primary] 完成"
+      exec tail -f /dev/null
+    fi
+
+    # ---------- replica (mysql-1, mysql-2) ----------
+    echo "[replica ${ordinal}] 等待 primary 與複寫帳號就緒..."
+    until mysqladmin ping -h "${primary_host}" -u"${MYSQL_REPL_USER}" -p"${MYSQL_REPL_PASSWORD}" --silent >/dev/null 2>&1; do sleep 2; done
+
+    # 已在複寫就不重做
+    io_ok="$(run_root -e "SELECT COUNT(*) FROM performance_schema.replication_connection_status WHERE SERVICE_STATE='ON';" 2>/dev/null || echo 0)"
+    if [ "${io_ok:-0}" -ge 1 ]; then
+      echo "[replica ${ordinal}] 複寫已在運行"
+      exec tail -f /dev/null
+    fi
+
+    # 允許從 primary 做 clone（持久化）
+    run_root -e "SET PERSIST clone_valid_donor_list='${primary_host}:3306';" >/dev/null 2>&1 || true
+
+    # sentinel：本機若還沒有應用 DB，代表尚未 clone（可跨重啟存活）
+    db_present="$(run_root -e "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='${MYSQL_DATABASE}';" 2>/dev/null || echo 0)"
+    if [ "${db_present:-0}" -lt 1 ]; then
+      echo "[replica ${ordinal}] 從 primary clone 資料（mysqld 會自動重啟）"
+      run_root -e "CLONE INSTANCE FROM '${MYSQL_REPL_USER}'@'${primary_host}':3306 IDENTIFIED BY '${MYSQL_REPL_PASSWORD}';" >/dev/null 2>&1 || true
+      sleep 10   # CLONE 後 mysqld 重啟；sidecar 退出讓它重跑、下一輪再設定複寫
+      exit 0
+    fi
+
+    echo "[replica ${ordinal}] 設定 GTID 複寫並啟動"
+    run_root -e "
+      STOP REPLICA;
+      CHANGE REPLICATION SOURCE TO
+        SOURCE_HOST='${primary_host}', SOURCE_PORT=3306,
+        SOURCE_USER='${MYSQL_REPL_USER}', SOURCE_PASSWORD='${MYSQL_REPL_PASSWORD}',
+        SOURCE_AUTO_POSITION=1, GET_SOURCE_PUBLIC_KEY=1;
+      START REPLICA;" >/dev/null 2>&1 || true
+    echo "[replica ${ordinal}] 複寫已啟動"
+    exec tail -f /dev/null

@@ -1,0 +1,99 @@
+# 21-app-deployment.yaml
+# 對應架構圖：deploy -> pod（應用程式本體）
+#
+# 高可用設計：
+#   - replicas: 3，分散到不同節點/AZ（podAntiAffinity + topologySpread）
+#   - RollingUpdate + maxUnavailable:0：更新時不中斷服務
+#   - readiness/liveness probe：流量只進健康 pod，掛掉自動重啟
+#   - 讀寫分流：寫連 mysql-writer，讀連 mysql-reader
+#   - DB 連線用最小權限的 app 帳號（非 root）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: asiayo-app
+  namespace: asiayo
+  labels:
+    app: asiayo-app
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0      # 確保更新期間維持滿載，零中斷
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: asiayo-app
+  template:
+    metadata:
+      labels:
+        app: asiayo-app
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: asiayo-app
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: asiayo-app
+      containers:
+        - name: app
+          # 釘住明確版本以利重現與回滾；正式環境建議再鎖到 image digest(@sha256:...)
+          image: asiayo/web-app:1.0.0
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: DB_WRITER_HOST
+              value: "mysql-writer.asiayo.svc.cluster.local"
+            - name: DB_READER_HOST
+              value: "mysql-reader.asiayo.svc.cluster.local"
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_DATABASE
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_APP_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_APP_PASSWORD
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: app-shared-data

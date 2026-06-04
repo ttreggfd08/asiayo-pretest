@@ -1,0 +1,33 @@
+# 23-app-ingress.yaml
+# 對應架構圖：ing(asiayo.com) -> svc
+# 使用 AWS Load Balancer Controller（由 terraform/lb-controller.tf 安裝），
+# 會自動建立一個對外的 ALB。chart 預設建立名為 alb 的 IngressClass。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: asiayo-ingress
+  namespace: asiayo
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    # ALB 本身即跨多 AZ，搭配健康檢查達到入口層高可用
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    # 預設只開 HTTP。要啟用 HTTPS：提供 ACM 憑證 ARN，並改用下面三行
+    # （沒有憑證就開 ssl-redirect 會把流量導到不存在的 443 listener，故預設不開）。
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    # alb.ingress.kubernetes.io/ssl-redirect: '443'
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-1:<acct>:certificate/xxxx
+spec:
+  ingressClassName: alb     # 取代已棄用的 kubernetes.io/ingress.class annotation
+  rules:
+    - host: asiayo.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: asiayo-app
+                port:
+                  number: 80

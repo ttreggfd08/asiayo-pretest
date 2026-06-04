@@ -1,0 +1,21 @@
+# 02-efs-storageclass.yaml
+# App 多副本共享儲存（ReadWriteMany）用的 StorageClass，走 EFS CSI。
+#
+# fileSystemId 需填 Terraform 建好的 EFS id：
+#   cd terraform && terraform output -raw efs_file_system_id
+#   再用 terraform output patch_efs_storageclass_cmd 提供的指令替換下面的佔位字串。
+#
+# 前置：terraform 已安裝 aws-efs-csi-driver addon 並透過 Pod Identity 授權。
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+provisioner: efs.csi.aws.com
+parameters:
+  provisioningMode: efs-ap          # 動態建立 EFS access point
+  fileSystemId: fs-REPLACE_WITH_TERRAFORM_OUTPUT
+  directoryPerms: "700"
+  uid: "1000"
+  gid: "1000"
+reclaimPolicy: Retain
+volumeBindingMode: Immediate

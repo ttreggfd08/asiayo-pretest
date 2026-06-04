@@ -1,0 +1,56 @@
+# 12-mysql-services.yaml
+# 對應架構圖：sts(mysql) 後面分出 writer / reader 兩種存取入口。
+---
+# (1) Headless Service：給 StatefulSet 穩定的 DNS（mysql-0.mysql、mysql-1.mysql ...）
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: asiayo
+  labels:
+    app: mysql
+spec:
+  clusterIP: None          # headless
+  selector:
+    app: mysql
+  ports:
+    - name: mysql
+      port: 3306
+---
+# (2) Writer Service：只導向 primary（mysql-0），應用程式「寫入」連這個
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-writer
+  namespace: asiayo
+  labels:
+    app: mysql
+    role: writer
+spec:
+  selector:
+    app: mysql
+    statefulset.kubernetes.io/pod-name: mysql-0   # 精準鎖定 primary pod
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+---
+# (3) Reader Service：導向所有 mysql pod（含 replica），應用程式「讀取」連這個，
+#     由 Service 做負載平衡分散讀流量。
+#     註：replica 透過 GTID 複寫與 primary 一致（見 13-statefulset 的 sidecar）；
+#     僅在 replica 剛啟動、複寫尚未接上的短暫窗口可能讀到較舊資料（最終一致）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-reader
+  namespace: asiayo
+  labels:
+    app: mysql
+    role: reader
+spec:
+  selector:
+    app: mysql          # 比對所有 mysql pod
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306

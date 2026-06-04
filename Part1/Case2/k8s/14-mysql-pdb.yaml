@@ -1,0 +1,13 @@
+# 14-mysql-pdb.yaml
+# PodDisruptionBudget：節點維護/排空(drain)時，至少保留 2 個 mysql pod 在線，
+# 避免一次驅逐太多造成資料庫不可用。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mysql-pdb
+  namespace: asiayo
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: mysql
