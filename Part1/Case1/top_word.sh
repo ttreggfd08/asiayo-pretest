@@ -10,8 +10,8 @@
 #   grep -v '^$'              : 移除空行
 #   sort | uniq -c            : 排序後計算每個單字次數
 #   sort -rn                  : 大到小排序
-#   head -n 1                 : 取第一名
-#   awk                       : 去掉 uniq -c 的前導空白
+#   awk 'NR==1'               : 取第一名，並去掉 uniq -c 的前導空白
+#                               （讀完整串流再輸出，避免 head 提前關閉造成 SIGPIPE）
 
 set -euo pipefail
 
@@ -28,5 +28,4 @@ tr 'A-Z' 'a-z' < "$FILE" \
   | sort \
   | uniq -c \
   | sort -rn \
-  | head -n 1 \
-  | awk '{print $1, $2}'
+  | awk 'NR==1 {print $1, $2}'

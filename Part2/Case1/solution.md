@@ -5,7 +5,7 @@
 - 應用層 HPA（依 CPU/QPS）、節點層 Cluster Autoscaler
 
 3.流量擋在前端
-- 前端或圖片做做CDN快取，不讓請求打到後端
+- 前端或圖片做CDN快取，不讓請求打到後端
 - 熱資料做快取放Redis or memcached 並設定合理的TTL
 - 讀寫分離，讀的流量到read replica ; 寫的可以用佇列走非同步處理
 - 做waiting room，流量超出上限時，用排隊頁面分批放行，保護後端不會有過多請求
